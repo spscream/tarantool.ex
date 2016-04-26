@@ -57,7 +57,7 @@ defmodule Tarantool do
 	end
 
   def init({host, port, timeout}) do
-    s = %{host: host, port: port, timeout: timeout, sock: nil, salt: nil, sync: 0, queue: %{}, response_size: nil, tail: ""}
+    s = %{host: host, port: port, timeout: timeout, sock: nil, salt: nil, sync: 0, queue: %{}}
     {:connect, :init, s}
   end
 
@@ -104,41 +104,18 @@ defmodule Tarantool do
   end
 
 	@doc false
-	def handle_info({:tcp, _, data}, %{sock: socket, tail: tail} = s) do
-    s = parse_data(tail <> data, s)
+	def handle_info({:tcp, _, packet_data}, %{sock: socket} = s) do
+		{:ok, {packet_length, data}} = MessagePack.unpack_once(packet_data)
+		{:ok, {header, body}} = MessagePack.unpack_once(data)
+		{:ok, {body, _rest}} = MessagePack.unpack_once(body)
 
-    :inet.setopts(socket, active: :once)
-    {:noreply, s}
+		sync = header[@iproto_keys[:sync]]
+
+		GenServer.reply(s.queue[sync], {:ok, header, body})
+
+		:inet.setopts(socket, active: :once)
+		{:noreply, %{s | queue: Map.delete(s.queue, sync)}}
 	end
-
-
-  def parse_data(data, %{response_size: nil} = s) do
-    case MessagePack.unpack_once(data) do
-      {:ok, {response_size, rest}} ->
-        parse_data(rest, %{s | response_size: response_size})
-      {:error, _} ->
-        %{s| tail: data}
-    end
-  end
-
-  def parse_data(data, %{response_size: response_size} = s ) do
-    cond do
-      byte_size(data) >= response_size ->
-        parse_response(data, s)
-      true ->
-        %{s| tail: data}
-    end
-  end
-
-  def parse_response(data, s) do
-    {:ok, {header, body}} = MessagePack.unpack_once(data)
-    {:ok, {body, rest}} = MessagePack.unpack_once(body)
-
-    sync = header[@iproto_keys[:sync]]
-    GenServer.reply(s.queue[sync], {:ok, header, body})
-
-    %{s| tail: rest, response_size: nil, queue: Map.delete(s.queue, sync)}
-  end
 
 	defp make_payload(:auth, %{username: username, password: password}, %{salt: salt} = s) do
 		make_payload(:auth, %{username: username, tuple: ["chap-sha1", scramble(salt, password)]}, s)
